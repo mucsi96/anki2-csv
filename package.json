@@ -1,0 +1,15 @@
+{
+  "name": "anki2-csv",
+  "version": "1.0.0",
+  "description": "Converts Anki .anki2 SQLite databases to CSV files",
+  "main": "anki-to-csv.js",
+  "bin": {
+    "anki2-csv": "anki-to-csv.js"
+  },
+  "scripts": {
+    "start": "node anki-to-csv.js"
+  },
+  "dependencies": {
+    "sql.js": "^1.12.0"
+  }
+}
