@@ -10,6 +10,7 @@
     "start": "node anki-to-csv.js \"/mnt/c/Users/mucsi/AppData/Roaming/Anki2/User 1/collection.anki2\""
   },
   "dependencies": {
+    "@inquirer/prompts": "^8.2.0",
     "pdfkit": "^0.17.2",
     "sql.js": "^1.12.0"
   }

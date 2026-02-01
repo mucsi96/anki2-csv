@@ -13,8 +13,6 @@
 const initSqlJs = require('sql.js');
 const fs = require('fs');
 const path = require('path');
-const readline = require('readline');
-
 const FIELD_SEPARATOR = '\x1f';
 
 // ── Utility functions ───────────────────────────────────────────────────
@@ -232,63 +230,6 @@ class AnkiDatabase {
     }
 }
 
-// ── Interactive prompt helpers ──────────────────────────────────────────
-
-function createRL() {
-    return readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-    });
-}
-
-function ask(rl, question) {
-    return new Promise(resolve => rl.question(question, resolve));
-}
-
-async function selectOne(rl, prompt, choices) {
-    console.log(`\n${prompt}`);
-    choices.forEach((c, i) => console.log(`  ${i + 1}) ${c}`));
-    while (true) {
-        const answer = await ask(rl, '\n> ');
-        const idx = parseInt(answer.trim(), 10) - 1;
-        if (idx >= 0 && idx < choices.length) return idx;
-        console.log('  Invalid choice, try again.');
-    }
-}
-
-async function confirm(rl, prompt) {
-    const answer = await ask(rl, `\n${prompt} [y/N] `);
-    const val = answer.trim().toLowerCase();
-    return val === 'y' || val === 'yes';
-}
-
-async function selectMany(rl, prompt, choices) {
-    console.log(`\n${prompt}`);
-    choices.forEach((c, i) => console.log(`  ${i + 1}) ${c}`));
-    console.log('\n  Enter column numbers (comma-separated), or "all"');
-    while (true) {
-        const answer = await ask(rl, '\n> ');
-        if (answer.trim().toLowerCase() === 'all') {
-            return choices.map((_, i) => i);
-        }
-        const parts = answer.split(',').map(s => s.trim()).filter(Boolean);
-        const indices = parts.map(s => parseInt(s, 10) - 1);
-        if (indices.length > 0 && indices.every(i => i >= 0 && i < choices.length)) {
-            return [...new Set(indices)];
-        }
-        console.log('  Invalid selection, try again.');
-    }
-}
-
-async function askLetter(rl) {
-    while (true) {
-        const answer = await ask(rl, '\n  Starting letter: ');
-        const letter = answer.trim().toUpperCase();
-        if (letter.length === 1 && /[A-Z]/.test(letter)) return letter;
-        console.log('  Please enter a single letter (A-Z).');
-    }
-}
-
 // ── Data building ───────────────────────────────────────────────────────
 
 function buildRows(ankiDb, rawData, includeMeta, selectedColumns) {
@@ -458,13 +399,13 @@ Opens an Anki database and guides you through an interactive export:
         process.exit(0);
     }
 
+    const { select, checkbox, confirm, input } = await import('@inquirer/prompts');
     const anki2Path = args[0];
 
     console.log('Anki Interactive Exporter');
     console.log('========================\n');
 
     const ankiDb = new AnkiDatabase(anki2Path);
-    const rl = createRL();
 
     try {
         // ── Load database ───────────────────────────────────────────
@@ -473,23 +414,28 @@ Opens an Anki database and guides you through an interactive export:
 
         const modelCount = Object.keys(ankiDb.models).length;
         const deckCount = Object.keys(ankiDb.decks).length;
-        console.log(`Found ${modelCount} note type(s), ${deckCount} deck(s)`);
+        console.log(`Found ${modelCount} note type(s), ${deckCount} deck(s)\n`);
 
         // ── Step 1: Select a deck ───────────────────────────────────
         const deckStats = ankiDb.getDeckStats();
         if (deckStats.length === 0) {
-            console.log('\nNo decks with cards found in this database.');
+            console.log('No decks with cards found in this database.');
             return;
         }
 
-        const deckChoices = deckStats.map(d =>
-            `${d.name}  (${d.noteCount} notes, ${d.cardCount} cards)`
-        );
-        const deckIdx = await selectOne(rl, 'Select a deck:', deckChoices);
-        const selectedDeck = deckStats[deckIdx];
+        const selectedDeck = await select({
+            message: 'Select a deck:',
+            choices: deckStats.map(d => ({
+                name: `${d.name}  (${d.noteCount} notes, ${d.cardCount} cards)`,
+                value: d
+            }))
+        });
 
         // ── Step 2: Include metadata? ───────────────────────────────
-        const includeMeta = await confirm(rl, 'Include metadata columns?');
+        const includeMeta = await confirm({
+            message: 'Include metadata columns?',
+            default: false
+        });
 
         // ── Fetch raw data from DB ──────────────────────────────────
         const rawData = includeMeta
@@ -497,7 +443,7 @@ Opens an Anki database and guides you through an interactive export:
             : ankiDb.getNotesForDeck(selectedDeck.id);
 
         if (rawData.length === 0) {
-            console.log('\nNo data found for this deck.');
+            console.log('No data found for this deck.');
             return;
         }
 
@@ -518,40 +464,61 @@ Opens an Anki database and guides you through an interactive export:
         ];
 
         // ── Step 3: Pick columns ────────────────────────────────────
-        const colIndices = await selectMany(
-            rl, 'Select columns to include:', allAvailable
-        );
-        const selectedColumns = colIndices.map(i => allAvailable[i]);
+        const selectedColumns = await checkbox({
+            message: 'Select columns to include:',
+            choices: allAvailable.map(col => ({
+                name: col,
+                value: col,
+                checked: true
+            })),
+            required: true
+        });
 
         // ── Step 4: Export mode ─────────────────────────────────────
-        const exportModeIdx = await selectOne(rl, 'Export rows:', [
-            'All rows',
-            'Filter by starting letter'
-        ]);
+        const exportMode = await select({
+            message: 'Export rows:',
+            choices: [
+                { name: 'All rows', value: 'all' },
+                { name: 'Filter by starting letter', value: 'filter' }
+            ]
+        });
 
         let filterColumn = null;
         let filterLetter = null;
 
-        if (exportModeIdx === 1) {
-            // Only offer field/tag columns for letter-filtering (not meta IDs)
+        if (exportMode === 'filter') {
             const filterableColumns = selectedColumns.filter(
                 c => !META_COLUMNS.includes(c)
             );
 
             if (filterableColumns.length === 0) {
-                console.log('\n  No field columns selected to filter on. Exporting all rows.');
+                console.log('No field columns selected to filter on. Exporting all rows.');
             } else {
-                const filterIdx = await selectOne(
-                    rl, 'Which column to filter and sort by?', filterableColumns
-                );
-                filterColumn = filterableColumns[filterIdx];
-                filterLetter = await askLetter(rl);
+                filterColumn = await select({
+                    message: 'Which column to filter and sort by?',
+                    choices: filterableColumns.map(col => ({
+                        name: col,
+                        value: col
+                    }))
+                });
+
+                const letterRaw = await input({
+                    message: 'Starting letter:',
+                    validate: val =>
+                        /^[A-Za-z]$/.test(val.trim()) || 'Enter a single letter (A-Z)'
+                });
+                filterLetter = letterRaw.trim().toUpperCase();
             }
         }
 
         // ── Step 5: Export format ───────────────────────────────────
-        const formatIdx = await selectOne(rl, 'Export format:', ['CSV', 'PDF']);
-        const format = formatIdx === 0 ? 'csv' : 'pdf';
+        const format = await select({
+            message: 'Export format:',
+            choices: [
+                { name: 'CSV', value: 'csv' },
+                { name: 'PDF', value: 'pdf' }
+            ]
+        });
 
         // ── Build, filter, sort ─────────────────────────────────────
         let rows = buildRows(ankiDb, rawData, includeMeta, selectedColumns);
@@ -596,7 +563,6 @@ Opens an Anki database and guides you through an interactive export:
         console.error(`\nError: ${error.message}`);
         process.exit(1);
     } finally {
-        rl.close();
         ankiDb.close();
     }
 }
