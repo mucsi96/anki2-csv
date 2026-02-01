@@ -1,7 +1,7 @@
 {
   "name": "anki2-csv",
   "version": "1.0.0",
-  "description": "Converts Anki .anki2 SQLite databases to CSV files",
+  "description": "Interactive Anki .anki2 exporter to CSV/PDF",
   "main": "anki-to-csv.js",
   "bin": {
     "anki2-csv": "anki-to-csv.js"
@@ -10,6 +10,8 @@
     "start": "node anki-to-csv.js \"/mnt/c/Users/mucsi/AppData/Roaming/Anki2/User 1/collection.anki2\" out"
   },
   "dependencies": {
+    "@inquirer/prompts": "^8.2.0",
+    "pdfkit": "^0.17.2",
     "sql.js": "^1.12.0"
   }
 }

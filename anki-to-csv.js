@@ -1,59 +1,61 @@
 #!/usr/bin/env node
 
 /**
- * Anki .anki2 to CSV Converter
- * 
- * Reads an Anki SQLite database (.anki2 file) and creates separate CSV files
- * for each deck, analyzing card types to determine appropriate columns.
- * 
- * Usage: node anki-to-csv.js <path-to-anki2-file> [output-directory]
- * 
- * Database Structure (from AnkiDroid wiki):
- * - col: Collection metadata with models/decks as JSON
- * - notes: Note content with fields separated by 0x1f
- * - cards: Card instances linked to notes and decks
+ * Anki Interactive Exporter
+ *
+ * Reads an Anki SQLite database (.anki2 file) and guides the user through
+ * an interactive export workflow: deck selection, column picking, filtering,
+ * and export to CSV or PDF.
+ *
+ * Usage: node anki-to-csv.js <path-to-anki2-file>
  */
 
 const initSqlJs = require('sql.js');
 const fs = require('fs');
 const path = require('path');
-
-// Field separator used in Anki notes.flds
 const FIELD_SEPARATOR = '\x1f';
 
-/**
- * Sanitizes a string for CSV output
- * - Escapes double quotes by doubling them
- * - Wraps in quotes if contains comma, newline, or quote
- */
-function escapeCsvField(value) {
-    if (value === null || value === undefined) {
-        return '';
-    }
-    const str = String(value);
-    // Remove HTML tags for cleaner CSV output (optional)
-    const cleaned = str.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-    
-    if (cleaned.includes(',') || cleaned.includes('"') || cleaned.includes('\n') || cleaned.includes('\r')) {
-        return '"' + cleaned.replace(/"/g, '""') + '"';
-    }
-    return cleaned;
+// ── Utility functions ───────────────────────────────────────────────────
+
+function decodeHtmlEntities(str) {
+    return str
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&amp;/gi, '&')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&#(\d+);/g, (_, num) => String.fromCharCode(parseInt(num, 10)))
+        .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
 }
 
-/**
- * Sanitizes filename by removing/replacing invalid characters
- */
+function stripHtml(value) {
+    if (value === null || value === undefined) return '';
+    return decodeHtmlEntities(String(value).replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+}
+
+function escapeCsvField(value) {
+    const str = stripHtml(value);
+    if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+        return '"' + str.replace(/"/g, '""') + '"';
+    }
+    return str;
+}
+
+const ARTICLES = /^(die|der|das|den|dem|ein|eine|einen|einem|einer)\s+/i;
+
+function stripArticle(value) {
+    return value.replace(ARTICLES, '');
+}
+
 function sanitizeFilename(name) {
     return name
         .replace(/[<>:"/\\|?*]/g, '_')
         .replace(/\s+/g, '_')
         .replace(/__+/g, '_')
-        .substring(0, 100); // Limit length
+        .substring(0, 100);
 }
 
-/**
- * Card type mapping
- */
 const CARD_TYPES = {
     0: 'new',
     1: 'learning',
@@ -72,100 +74,81 @@ const QUEUE_TYPES = {
     '4': 'preview'
 };
 
-/**
- * Helper to execute SQL and get all results as array of objects
- */
+const META_COLUMNS = [
+    'note_id',
+    'card_id',
+    'card_ord',
+    'note_type',
+    'note_type_style',
+    'card_status',
+    'card_queue',
+    'interval_days',
+    'ease_factor',
+    'reviews',
+    'lapses',
+    'due',
+    'last_modified'
+];
+
+// ── Database helpers ────────────────────────────────────────────────────
+
 function queryAll(db, sql, params = []) {
     const stmt = db.prepare(sql);
-    if (params.length > 0) {
-        stmt.bind(params);
-    }
+    if (params.length > 0) stmt.bind(params);
     const results = [];
-    while (stmt.step()) {
-        const row = stmt.getAsObject();
-        results.push(row);
-    }
+    while (stmt.step()) results.push(stmt.getAsObject());
     stmt.free();
     return results;
 }
 
-/**
- * Helper to execute SQL and get single result
- */
 function queryOne(db, sql, params = []) {
     const stmt = db.prepare(sql);
-    if (params.length > 0) {
-        stmt.bind(params);
-    }
+    if (params.length > 0) stmt.bind(params);
     let result = null;
-    if (stmt.step()) {
-        result = stmt.getAsObject();
-    }
+    if (stmt.step()) result = stmt.getAsObject();
     stmt.free();
     return result;
 }
 
-/**
- * Main converter class
- */
-class AnkiToCsvConverter {
-    constructor(anki2Path, outputDir) {
+// ── AnkiDatabase ────────────────────────────────────────────────────────
+
+class AnkiDatabase {
+    constructor(anki2Path) {
         this.anki2Path = anki2Path;
-        this.outputDir = outputDir || process.cwd();
         this.db = null;
         this.models = {};
         this.decks = {};
     }
 
-    /**
-     * Opens the database and loads collection metadata
-     */
     async open() {
-        console.log(`Opening database: ${this.anki2Path}`);
-        
         if (!fs.existsSync(this.anki2Path)) {
             throw new Error(`File not found: ${this.anki2Path}`);
         }
-
-        // Initialize sql.js
         const SQL = await initSqlJs();
-        
-        // Read database file
         const fileBuffer = fs.readFileSync(this.anki2Path);
         this.db = new SQL.Database(fileBuffer);
-        
-        // Load collection metadata
+        this._loadMetadata();
+    }
+
+    _loadMetadata() {
         const col = queryOne(this.db, 'SELECT models, decks FROM col');
+        if (!col) throw new Error('No collection data found in database');
 
-        if (!col) {
-            throw new Error('No collection data found in database');
-        }
+        const hasLegacy =
+            col.models && col.models !== '{}' && col.models !== '' &&
+            col.decks && col.decks !== '{}' && col.decks !== '';
 
-        // Try legacy schema first (models/decks as JSON in col table)
-        const hasLegacyModels = col.models && col.models !== '{}' && col.models !== '';
-        const hasLegacyDecks = col.decks && col.decks !== '{}' && col.decks !== '';
-
-        if (hasLegacyModels && hasLegacyDecks) {
+        if (hasLegacy) {
             this.models = JSON.parse(col.models);
             this.decks = JSON.parse(col.decks);
         } else {
-            // New schema (Anki 2.1.28+): separate tables
-            this.models = this._loadModelsFromTables();
-            this.decks = this._loadDecksFromTable();
+            this._loadModernSchema();
         }
-
-        console.log(`Found ${Object.keys(this.models).length} note type(s)`);
-        console.log(`Found ${Object.keys(this.decks).length} deck(s)`);
     }
 
-    /**
-     * Loads models from the new schema tables (notetypes, FIELDS, templates)
-     */
-    _loadModelsFromTables() {
-        const models = {};
-        const notetypes = queryAll(this.db, 'SELECT id, name FROM notetypes');
-
-        for (const nt of notetypes) {
+    _loadModernSchema() {
+        this.models = {};
+        for (const nt of queryAll(this.db, 'SELECT id, name FROM notetypes')) {
             const fields = queryAll(
                 this.db,
                 'SELECT ord, name FROM FIELDS WHERE ntid = ? ORDER BY ord',
@@ -176,512 +159,505 @@ class AnkiToCsvConverter {
                 'SELECT ord, name FROM templates WHERE ntid = ? ORDER BY ord',
                 [nt.id]
             );
-
-            models[nt.id] = {
+            this.models[nt.id] = {
                 name: nt.name,
                 flds: fields.map(f => ({ ord: f.ord, name: f.name })),
                 tmpls: templates.map(t => ({ name: t.name, ord: t.ord })),
-                type: 0 // default to standard; cloze detection not available without protobuf
+                type: 0
             };
         }
-
-        return models;
-    }
-
-    /**
-     * Loads decks from the new schema decks table
-     */
-    _loadDecksFromTable() {
-        const decks = {};
-        const rows = queryAll(this.db, 'SELECT id, name FROM decks');
-
-        for (const row of rows) {
-            decks[row.id] = { name: row.name };
+        this.decks = {};
+        for (const d of queryAll(this.db, 'SELECT id, name FROM decks')) {
+            this.decks[d.id] = { name: d.name };
         }
-
-        return decks;
     }
 
-    /**
-     * Gets field names for a model (note type)
-     */
     getFieldNames(modelId) {
         const model = this.models[modelId];
-        if (!model) {
-            console.warn(`Model ${modelId} not found`);
-            return [];
-        }
-        
-        // Sort fields by ordinal and extract names
-        return model.flds
-            .sort((a, b) => a.ord - b.ord)
-            .map(f => f.name);
+        if (!model) return [];
+        return model.flds.sort((a, b) => a.ord - b.ord).map(f => f.name);
     }
 
-    /**
-     * Gets model name
-     */
     getModelName(modelId) {
-        const model = this.models[modelId];
-        return model ? model.name : `Unknown_${modelId}`;
+        return this.models[modelId]?.name || `Unknown_${modelId}`;
     }
 
-    /**
-     * Gets model type (0=standard, 1=cloze)
-     */
     getModelType(modelId) {
         const model = this.models[modelId];
         return model ? (model.type === 1 ? 'cloze' : 'standard') : 'unknown';
     }
 
-    /**
-     * Gets deck name (handles nested decks with :: separator)
-     */
     getDeckName(deckId) {
-        const deck = this.decks[deckId];
-        return deck ? deck.name : `Unknown_${deckId}`;
+        return this.decks[deckId]?.name || `Unknown_${deckId}`;
     }
 
-    /**
-     * Parses note fields into an object using model field definitions
-     */
-    parseNoteFields(flds, modelId) {
-        const fieldNames = this.getFieldNames(modelId);
-        const fieldValues = flds.split(FIELD_SEPARATOR);
-        
-        const result = {};
-        fieldNames.forEach((name, index) => {
-            result[name] = fieldValues[index] || '';
-        });
-        
-        return result;
-    }
-
-    /**
-     * Gets all cards grouped by deck
-     */
-    getCardsByDeck() {
-        const query = `
-            SELECT 
-                c.id as card_id,
-                c.nid as note_id,
-                c.did as deck_id,
-                c.ord as card_ord,
-                c.type as card_type,
-                c.queue as card_queue,
-                c.due as card_due,
-                c.ivl as card_interval,
-                c.factor as card_factor,
-                c.reps as card_reps,
-                c.lapses as card_lapses,
-                c.mod as card_mod,
-                n.mid as model_id,
-                n.flds as fields,
-                n.tags as tags,
-                n.mod as note_mod
+    getDeckStats() {
+        const rows = queryAll(this.db, `
+            SELECT c.did AS deck_id,
+                   COUNT(DISTINCT n.id) AS note_count,
+                   COUNT(c.id)          AS card_count
             FROM cards c
             JOIN notes n ON c.nid = n.id
-            ORDER BY c.did, n.mid, c.ord
-        `;
-
-        const rows = queryAll(this.db, query);
-        
-        // Group by deck
-        const byDeck = {};
-        for (const row of rows) {
-            const deckId = row.deck_id;
-            if (!byDeck[deckId]) {
-                byDeck[deckId] = [];
-            }
-            byDeck[deckId].push(row);
-        }
-
-        return byDeck;
+            GROUP BY c.did
+        `);
+        return rows.map(r => ({
+            id: r.deck_id,
+            name: this.getDeckName(r.deck_id),
+            noteCount: r.note_count,
+            cardCount: r.card_count
+        }));
     }
 
-    /**
-     * Analyzes what columns are needed for a set of cards
-     */
-    analyzeColumns(cards) {
-        const columns = new Set();
-        const fieldsByModel = {};
-
-        for (const card of cards) {
-            const modelId = card.model_id;
-            
-            if (!fieldsByModel[modelId]) {
-                fieldsByModel[modelId] = this.getFieldNames(modelId);
-            }
-            
-            // Add all fields from this model
-            fieldsByModel[modelId].forEach(f => columns.add(f));
-        }
-
-        return {
-            fieldColumns: Array.from(columns),
-            modelInfo: fieldsByModel
-        };
+    getNotesForDeck(deckId) {
+        return queryAll(this.db, `
+            SELECT DISTINCT n.id  AS note_id,
+                            n.mid AS model_id,
+                            n.flds AS fields,
+                            n.tags AS tags
+            FROM notes n
+            JOIN cards c ON c.nid = n.id
+            WHERE c.did = ?
+        `, [deckId]);
     }
 
-    /**
-     * Exports cards to CSV for a single deck
-     */
-    exportDeckToCsv(deckId, cards) {
-        const deckName = this.getDeckName(deckId);
-        const safeName = sanitizeFilename(deckName);
-        const outputPath = path.join(this.outputDir, `${safeName}.csv`);
-
-        console.log(`\nExporting deck: "${deckName}" (${cards.length} cards)`);
-
-        // Analyze what columns we need
-        const { fieldColumns, modelInfo } = this.analyzeColumns(cards);
-
-        // Define metadata columns
-        const metaColumns = [
-            'note_id',
-            'card_id', 
-            'card_ord',
-            'note_type',
-            'note_type_style',
-            'tags',
-            'card_status',
-            'card_queue',
-            'interval_days',
-            'ease_factor',
-            'reviews',
-            'lapses',
-            'due',
-            'last_modified'
-        ];
-
-        // Combine all columns
-        const allColumns = [...metaColumns, ...fieldColumns];
-
-        // Build CSV content
-        const lines = [];
-        
-        // Header row
-        lines.push(allColumns.map(escapeCsvField).join(','));
-
-        // Data rows
-        for (const card of cards) {
-            const parsedFields = this.parseNoteFields(card.fields, card.model_id);
-            const modelName = this.getModelName(card.model_id);
-            const modelType = this.getModelType(card.model_id);
-
-            const row = [
-                // Metadata
-                card.note_id,
-                card.card_id,
-                card.card_ord,
-                modelName,
-                modelType,
-                (card.tags || '').trim(),
-                CARD_TYPES[card.card_type] || card.card_type,
-                QUEUE_TYPES[card.card_queue] || card.card_queue,
-                card.card_interval,
-                (card.card_factor / 1000).toFixed(2), // Convert permille to multiplier
-                card.card_reps,
-                card.card_lapses,
-                card.card_due,
-                new Date(card.card_mod * 1000).toISOString()
-            ];
-
-            // Add field values (in order of fieldColumns)
-            for (const fieldName of fieldColumns) {
-                row.push(parsedFields[fieldName] || '');
-            }
-
-            lines.push(row.map(escapeCsvField).join(','));
-        }
-
-        // Write file
-        fs.writeFileSync(outputPath, lines.join('\n'), 'utf8');
-        console.log(`  -> Saved: ${outputPath}`);
-        console.log(`  -> Columns: ${allColumns.length} (${metaColumns.length} meta + ${fieldColumns.length} fields)`);
-        console.log(`  -> Fields: ${fieldColumns.join(', ')}`);
-
-        return {
-            path: outputPath,
-            deckName,
-            cardCount: cards.length,
-            columns: allColumns
-        };
+    getCardsForDeck(deckId) {
+        return queryAll(this.db, `
+            SELECT c.id     AS card_id,
+                   c.nid    AS note_id,
+                   c.ord    AS card_ord,
+                   c.type   AS card_type,
+                   c.queue  AS card_queue,
+                   c.due    AS card_due,
+                   c.ivl    AS card_interval,
+                   c.factor AS card_factor,
+                   c.reps   AS card_reps,
+                   c.lapses AS card_lapses,
+                   c.mod    AS card_mod,
+                   n.mid    AS model_id,
+                   n.flds   AS fields,
+                   n.tags   AS tags
+            FROM cards c
+            JOIN notes n ON c.nid = n.id
+            WHERE c.did = ?
+            ORDER BY n.mid, c.ord
+        `, [deckId]);
     }
 
-    /**
-     * Generates a summary report
-     */
-    generateSummary(results) {
-        const summaryPath = path.join(this.outputDir, '_export_summary.txt');
-        
-        const lines = [
-            '='.repeat(60),
-            'ANKI TO CSV EXPORT SUMMARY',
-            '='.repeat(60),
-            '',
-            `Source: ${this.anki2Path}`,
-            `Export Date: ${new Date().toISOString()}`,
-            '',
-            '-'.repeat(60),
-            'NOTE TYPES (Models)',
-            '-'.repeat(60),
-            ''
-        ];
-
-        for (const [id, model] of Object.entries(this.models)) {
-            const fields = model.flds.sort((a, b) => a.ord - b.ord).map(f => f.name);
-            const type = model.type === 1 ? 'Cloze' : 'Standard';
-            lines.push(`[${model.name}] (${type})`);
-            lines.push(`  ID: ${id}`);
-            lines.push(`  Fields: ${fields.join(', ')}`);
-            lines.push(`  Templates: ${model.tmpls.map(t => t.name).join(', ')}`);
-            lines.push('');
-        }
-
-        lines.push('-'.repeat(60));
-        lines.push('EXPORTED DECKS');
-        lines.push('-'.repeat(60));
-        lines.push('');
-
-        for (const result of results) {
-            lines.push(`[${result.deckName}]`);
-            lines.push(`  Cards: ${result.cardCount}`);
-            lines.push(`  File: ${path.basename(result.path)}`);
-            lines.push('');
-        }
-
-        lines.push('='.repeat(60));
-
-        fs.writeFileSync(summaryPath, lines.join('\n'), 'utf8');
-        console.log(`\nSummary saved: ${summaryPath}`);
-    }
-
-    /**
-     * Main conversion process
-     */
-    async convert() {
-        try {
-            await this.open();
-
-            // Ensure output directory exists
-            if (!fs.existsSync(this.outputDir)) {
-                fs.mkdirSync(this.outputDir, { recursive: true });
-            }
-
-            // Get all cards grouped by deck
-            const cardsByDeck = this.getCardsByDeck();
-
-            if (Object.keys(cardsByDeck).length === 0) {
-                console.log('No cards found in database');
-                return;
-            }
-
-            // Export each deck
-            const results = [];
-            for (const [deckId, cards] of Object.entries(cardsByDeck)) {
-                const result = this.exportDeckToCsv(deckId, cards);
-                results.push(result);
-            }
-
-            // Generate summary
-            this.generateSummary(results);
-
-            console.log('\n' + '='.repeat(60));
-            console.log(`Export complete! ${results.length} deck(s) exported.`);
-            console.log('='.repeat(60));
-
-        } finally {
-            if (this.db) {
-                this.db.close();
-            }
-        }
+    close() {
+        if (this.db) this.db.close();
     }
 }
 
-/**
- * Alternative simple export - just notes with fields, grouped by deck
- */
-class SimpleAnkiExporter {
-    constructor(anki2Path, outputDir) {
-        this.anki2Path = anki2Path;
-        this.outputDir = outputDir || process.cwd();
-        this.db = null;
-    }
+// ── Data building ───────────────────────────────────────────────────────
 
-    async open() {
-        const SQL = await initSqlJs();
-        const fileBuffer = fs.readFileSync(this.anki2Path);
-        this.db = new SQL.Database(fileBuffer);
-    }
+function buildRows(ankiDb, rawData, includeMeta, selectedColumns) {
+    const rows = [];
 
-    /**
-     * Simple export: one CSV per deck with just the note fields
-     */
-    async exportSimple() {
-        await this.open();
+    for (const item of rawData) {
+        const fieldNames = ankiDb.getFieldNames(item.model_id);
+        const fieldValues = item.fields.split(FIELD_SEPARATOR);
+        const parsedFields = {};
+        fieldNames.forEach((name, i) => {
+            parsedFields[name] = stripHtml(fieldValues[i] || '');
+        });
 
-        if (!fs.existsSync(this.outputDir)) {
-            fs.mkdirSync(this.outputDir, { recursive: true });
+        const row = {};
+
+        // Metadata columns (only when meta mode is on)
+        if (includeMeta) {
+            row['note_id'] = item.note_id;
+            row['card_id'] = item.card_id;
+            row['card_ord'] = item.card_ord;
+            row['note_type'] = ankiDb.getModelName(item.model_id);
+            row['note_type_style'] = ankiDb.getModelType(item.model_id);
+            row['card_status'] = CARD_TYPES[item.card_type] || String(item.card_type);
+            row['card_queue'] = QUEUE_TYPES[item.card_queue] || String(item.card_queue);
+            row['interval_days'] = item.card_interval;
+            row['ease_factor'] = (item.card_factor / 1000).toFixed(2);
+            row['reviews'] = item.card_reps;
+            row['lapses'] = item.card_lapses;
+            row['due'] = item.card_due;
+            row['last_modified'] = new Date(item.card_mod * 1000).toISOString();
         }
 
-        try {
-            // Get collection metadata
-            const col = queryOne(this.db, 'SELECT models, decks FROM col');
-            const hasLegacyModels = col.models && col.models !== '{}' && col.models !== '';
-            const hasLegacyDecks = col.decks && col.decks !== '{}' && col.decks !== '';
-
-            let models, decks;
-            if (hasLegacyModels && hasLegacyDecks) {
-                models = JSON.parse(col.models);
-                decks = JSON.parse(col.decks);
-            } else {
-                // New schema (Anki 2.1.28+)
-                models = {};
-                const notetypes = queryAll(this.db, 'SELECT id, name FROM notetypes');
-                for (const nt of notetypes) {
-                    const fields = queryAll(this.db, 'SELECT ord, name FROM FIELDS WHERE ntid = ? ORDER BY ord', [nt.id]);
-                    models[nt.id] = {
-                        name: nt.name,
-                        flds: fields.map(f => ({ ord: f.ord, name: f.name }))
-                    };
-                }
-                decks = {};
-                const deckRows2 = queryAll(this.db, 'SELECT id, name FROM decks');
-                for (const d of deckRows2) {
-                    decks[d.id] = { name: d.name };
-                }
-            }
-
-            // Get unique deck IDs from cards
-            const deckRows = queryAll(this.db, 'SELECT DISTINCT did FROM cards');
-            const deckIds = deckRows.map(r => r.did);
-
-            console.log(`Found ${deckIds.length} deck(s) with cards\n`);
-
-            for (const deckId of deckIds) {
-                const deckName = decks[deckId]?.name || `Deck_${deckId}`;
-                
-                // Get all notes in this deck with their model info
-                const notes = queryAll(this.db, `
-                    SELECT DISTINCT n.id, n.mid, n.flds, n.tags
-                    FROM notes n
-                    JOIN cards c ON c.nid = n.id
-                    WHERE c.did = ?
-                `, [deckId]);
-
-                if (notes.length === 0) continue;
-
-                // Group notes by model to handle different field structures
-                const notesByModel = {};
-                for (const note of notes) {
-                    if (!notesByModel[note.mid]) {
-                        notesByModel[note.mid] = [];
-                    }
-                    notesByModel[note.mid].push(note);
-                }
-
-                // Export each model's notes to a separate file within the deck
-                for (const [modelId, modelNotes] of Object.entries(notesByModel)) {
-                    const model = models[modelId];
-                    const modelName = model?.name || `Model_${modelId}`;
-                    const fieldNames = model?.flds?.sort((a, b) => a.ord - b.ord).map(f => f.name) || [];
-
-                    const safeDeckName = sanitizeFilename(deckName);
-                    const safeModelName = sanitizeFilename(modelName);
-                    const filename = Object.keys(notesByModel).length > 1 
-                        ? `${safeDeckName}_${safeModelName}.csv`
-                        : `${safeDeckName}.csv`;
-                    
-                    const outputPath = path.join(this.outputDir, filename);
-
-                    // Build CSV
-                    const lines = [];
-                    
-                    // Header: fields + tags
-                    const header = [...fieldNames, 'tags'];
-                    lines.push(header.map(escapeCsvField).join(','));
-
-                    // Data rows
-                    for (const note of modelNotes) {
-                        const fieldValues = note.flds.split(FIELD_SEPARATOR);
-                        const row = [...fieldValues.slice(0, fieldNames.length), (note.tags || '').trim()];
-                        lines.push(row.map(escapeCsvField).join(','));
-                    }
-
-                    fs.writeFileSync(outputPath, lines.join('\n'), 'utf8');
-                    console.log(`Exported: ${filename}`);
-                    console.log(`  Deck: ${deckName}`);
-                    console.log(`  Note Type: ${modelName}`);
-                    console.log(`  Notes: ${modelNotes.length}`);
-                    console.log(`  Fields: ${fieldNames.join(', ')}\n`);
-                }
-            }
-
-        } finally {
-            this.db.close();
+        // Field columns
+        for (const name of fieldNames) {
+            row[name] = parsedFields[name];
         }
+
+        // Tags (always available)
+        row['tags'] = (item.tags || '').trim();
+
+        // Keep only the user-selected columns, in selection order
+        const filtered = {};
+        for (const col of selectedColumns) {
+            filtered[col] = row[col] !== undefined ? String(row[col]) : '';
+        }
+        rows.push(filtered);
     }
+
+    return rows;
 }
 
-// CLI Interface
+// ── CSV export ──────────────────────────────────────────────────────────
+
+function exportToCsv(outputPath, columns, rows) {
+    const lines = [];
+    lines.push(columns.map(escapeCsvField).join(','));
+    for (const row of rows) {
+        lines.push(columns.map(col => escapeCsvField(row[col])).join(','));
+    }
+    fs.writeFileSync(outputPath, lines.join('\n'), 'utf8');
+}
+
+// ── PDF export ──────────────────────────────────────────────────────────
+
+function findUnicodeFont() {
+    const candidates = [
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+        '/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf',
+    ];
+    for (const p of candidates) {
+        if (fs.existsSync(p)) return p;
+    }
+    return null;
+}
+
+function findUnicodeFontBold() {
+    const candidates = [
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+        '/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf',
+    ];
+    for (const p of candidates) {
+        if (fs.existsSync(p)) return p;
+    }
+    return null;
+}
+
+function exportToPdf(outputPath, columns, rows, title, filterLetter) {
+    let PDFDocument;
+    try {
+        PDFDocument = require('pdfkit');
+    } catch {
+        throw new Error('pdfkit is required for PDF export. Run: npm install');
+    }
+
+    const fontRegular = findUnicodeFont();
+    const fontBold = findUnicodeFontBold();
+
+    const doc = new PDFDocument({ layout: 'landscape', margin: 30, size: 'A4' });
+
+    if (fontRegular) doc.registerFont('Regular', fontRegular);
+    if (fontBold) doc.registerFont('Bold', fontBold);
+
+    const regularFont = fontRegular ? 'Regular' : 'Helvetica';
+    const boldFont = fontBold ? 'Bold' : 'Helvetica-Bold';
+
+    const stream = fs.createWriteStream(outputPath);
+    doc.pipe(stream);
+
+    const pageWidth = doc.page.width - 60;
+    const pageHeight = doc.page.height - 60;
+    const colCount = columns.length;
+    const colWidth = Math.floor(pageWidth / colCount);
+    const tableWidth = colWidth * colCount;
+    const fontSize = colCount > 10 ? 5 : colCount > 7 ? 6 : colCount > 4 ? 7 : 8;
+    const rowHeight = (fontSize + 6) * 2;
+    const headerHeight = fontSize + 8;
+
+    // Title
+    doc.fontSize(14).font(boldFont)
+        .text(title, 30, 30, { align: 'center', width: pageWidth });
+    doc.moveDown(0.3);
+    doc.fontSize(8).font(regularFont).fillColor('#666666')
+        .text(`${rows.length} rows | ${new Date().toISOString().slice(0, 10)}`, {
+            align: 'center', width: pageWidth
+        });
+    doc.moveDown(0.5);
+
+    let y = doc.y;
+
+    function drawHeader() {
+        doc.rect(30, y, tableWidth, headerHeight).fill('#4472C4');
+        doc.font(boldFont).fontSize(fontSize).fillColor('white');
+        columns.forEach((col, i) => {
+            doc.text(col, 33 + i * colWidth, y + 3, {
+                width: colWidth - 6, ellipsis: true, lineBreak: false
+            });
+        });
+        y += headerHeight;
+        doc.fillColor('black');
+    }
+
+    function drawFilterLetter() {
+        if (filterLetter) {
+            doc.save();
+            doc.font(boldFont).fontSize(24).fillColor('#CCCCCC')
+                .text(filterLetter, doc.page.width - 54, 10, { width: 30, align: 'right' });
+            doc.restore();
+            doc.font(regularFont).fontSize(fontSize).fillColor('black');
+        }
+    }
+
+    function checkPage() {
+        if (y + rowHeight > pageHeight + 30) {
+            doc.addPage({ layout: 'landscape', size: 'A4' });
+            y = 30;
+            drawFilterLetter();
+            drawHeader();
+        }
+    }
+
+    drawFilterLetter();
+    drawHeader();
+
+    doc.font(regularFont).fontSize(fontSize);
+    rows.forEach((row, rowIdx) => {
+        checkPage();
+
+        if (rowIdx % 2 === 0) {
+            doc.save();
+            doc.rect(30, y, tableWidth, rowHeight).fill('#F2F2F2');
+            doc.restore();
+            doc.fillColor('black');
+        }
+
+        columns.forEach((col, i) => {
+            const val = String(row[col] || '');
+            doc.text(val, 33 + i * colWidth, y + 2, {
+                width: colWidth - 6, height: rowHeight - 4, ellipsis: true, lineBreak: true
+            });
+        });
+        y += rowHeight;
+    });
+
+    doc.end();
+
+    return new Promise((resolve, reject) => {
+        stream.on('finish', resolve);
+        stream.on('error', reject);
+    });
+}
+
+// ── Main interactive flow ───────────────────────────────────────────────
+
 async function main() {
     const args = process.argv.slice(2);
 
     if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
         console.log(`
-Anki .anki2 to CSV Converter
-============================
+Anki Interactive Exporter
+=========================
 
-Reads an Anki SQLite database and creates separate CSV files for each deck.
+Usage: node anki-to-csv.js <anki2-file> [output-dir]
 
-Usage:
-  node anki-to-csv.js <anki2-file> [output-dir] [options]
-
-Arguments:
-  anki2-file    Path to the .anki2 SQLite database file
-  output-dir    Output directory for CSV files (default: current directory)
-
-Options:
-  --meta        Include metadata columns (card status, reviews, lapses, etc.)
-  --help, -h    Show this help message
-
-Examples:
-  node anki-to-csv.js collection.anki2
-  node anki-to-csv.js ~/Anki2/User/collection.anki2 ./output
-  node anki-to-csv.js collection.anki2 ./output --meta
-
-Note: For .apkg files, first extract them (they're ZIP files) to get the
-      .anki2 database file inside.
+Opens an Anki database and guides you through an interactive export:
+  1. Select a deck
+  2. Choose whether to include metadata columns
+  3. Pick individual columns
+  4. Export all rows or filter by starting letter
+  5. Choose export format (CSV or PDF)
 `);
         process.exit(0);
     }
 
-    const positionalArgs = args.filter(a => !a.startsWith('--'));
-    const anki2Path = positionalArgs[0];
-    const outputDir = positionalArgs[1];
-    const metaMode = args.includes('--meta');
+    const { select, confirm, input } = await import('@inquirer/prompts');
+    const anki2Path = args[0];
+    const outputDir = args[1] || '.';
 
-    console.log('Anki to CSV Converter');
-    console.log('=====================\n');
+    console.log('Anki Interactive Exporter');
+    console.log('========================\n');
+
+    const ankiDb = new AnkiDatabase(anki2Path);
 
     try {
-        if (metaMode) {
-            console.log('Mode: Full (with metadata)\n');
-            const converter = new AnkiToCsvConverter(anki2Path, outputDir);
-            await converter.convert();
-        } else {
-            console.log('Mode: Fields only\n');
-            const exporter = new SimpleAnkiExporter(anki2Path, outputDir);
-            await exporter.exportSimple();
+        // ── Load database ───────────────────────────────────────────
+        console.log(`Loading: ${anki2Path}`);
+        await ankiDb.open();
+
+        const modelCount = Object.keys(ankiDb.models).length;
+        const deckCount = Object.keys(ankiDb.decks).length;
+        console.log(`Found ${modelCount} note type(s), ${deckCount} deck(s)\n`);
+
+        // ── Step 1: Select a deck ───────────────────────────────────
+        const deckStats = ankiDb.getDeckStats();
+        if (deckStats.length === 0) {
+            console.log('No decks with cards found in this database.');
+            return;
         }
+
+        const selectedDeck = await select({
+            message: 'Select a deck:',
+            choices: deckStats.map(d => ({
+                name: `${d.name}  (${d.noteCount} notes, ${d.cardCount} cards)`,
+                value: d
+            }))
+        });
+
+        // ── Step 2: Include metadata? ───────────────────────────────
+        const includeMeta = await confirm({
+            message: 'Include metadata columns?',
+            default: false
+        });
+
+        // ── Fetch raw data from DB ──────────────────────────────────
+        const rawData = includeMeta
+            ? ankiDb.getCardsForDeck(selectedDeck.id)
+            : ankiDb.getNotesForDeck(selectedDeck.id);
+
+        if (rawData.length === 0) {
+            console.log('No data found for this deck.');
+            return;
+        }
+
+        // Collect field column names (union across note types)
+        const fieldNamesSet = new Set();
+        for (const item of rawData) {
+            for (const f of ankiDb.getFieldNames(item.model_id)) {
+                fieldNamesSet.add(f);
+            }
+        }
+        const fieldColumns = Array.from(fieldNamesSet);
+
+        // Build the full list of available columns
+        const allAvailable = [
+            ...(includeMeta ? META_COLUMNS : []),
+            ...fieldColumns,
+            'tags'
+        ];
+
+        // ── Step 3: Pick columns in order ─────────────────────────────
+        const selectedColumns = [];
+        let remaining = [...allAvailable];
+
+        while (remaining.length > 0) {
+            const choices = [
+                ...remaining.map(col => ({ name: col, value: col })),
+                ...(selectedColumns.length > 0
+                    ? [{ name: '── Done ──', value: '__done__' }]
+                    : [])
+            ];
+
+            const picked = await select({
+                message: selectedColumns.length === 0
+                    ? 'Pick the first column:'
+                    : `Pick column #${selectedColumns.length + 1} (${selectedColumns.join(', ')}):`,
+                choices
+            });
+
+            if (picked === '__done__') break;
+
+            selectedColumns.push(picked);
+            remaining = remaining.filter(c => c !== picked);
+        }
+
+        if (selectedColumns.length === 0) {
+            console.log('No columns selected. Exiting.');
+            ankiDb.close();
+            return;
+        }
+
+        // ── Step 4: Export mode ─────────────────────────────────────
+        const exportMode = await select({
+            message: 'Export rows:',
+            choices: [
+                { name: 'All rows', value: 'all' },
+                { name: 'Filter by starting letter', value: 'filter' }
+            ]
+        });
+
+        let filterColumn = null;
+        let filterLetter = null;
+
+        if (exportMode === 'filter') {
+            const filterableColumns = selectedColumns.filter(
+                c => !META_COLUMNS.includes(c)
+            );
+
+            if (filterableColumns.length === 0) {
+                console.log('No field columns selected to filter on. Exporting all rows.');
+            } else {
+                filterColumn = await select({
+                    message: 'Which column to filter and sort by?',
+                    choices: filterableColumns.map(col => ({
+                        name: col,
+                        value: col
+                    }))
+                });
+
+                const letterRaw = await input({
+                    message: 'Starting letter (articles like die/der/das are ignored):',
+                    validate: val =>
+                        /^[A-Za-z]$/.test(val.trim()) || 'Enter a single letter (A-Z)'
+                });
+                filterLetter = letterRaw.trim().toUpperCase();
+            }
+        }
+
+        // ── Step 5: Export format ───────────────────────────────────
+        const format = await select({
+            message: 'Export format:',
+            choices: [
+                { name: 'CSV', value: 'csv' },
+                { name: 'PDF', value: 'pdf' }
+            ]
+        });
+
+        // ── Build, filter, sort ─────────────────────────────────────
+        let rows = buildRows(ankiDb, rawData, includeMeta, selectedColumns);
+
+        if (filterColumn && filterLetter) {
+            rows = rows.filter(row => {
+                const val = stripArticle(String(row[filterColumn] || '').trim());
+                return val.length > 0 && val[0].toUpperCase() === filterLetter;
+            });
+        }
+
+        if (filterColumn) {
+            rows.sort((a, b) => {
+                const va = stripArticle(String(a[filterColumn] || '')).toLowerCase();
+                const vb = stripArticle(String(b[filterColumn] || '')).toLowerCase();
+                return va.localeCompare(vb);
+            });
+        }
+
+        if (rows.length === 0) {
+            console.log('\nNo rows match the filter. Nothing to export.');
+            return;
+        }
+
+        // ── Generate output ─────────────────────────────────────────
+        const resolvedDir = path.resolve(outputDir);
+        if (!fs.existsSync(resolvedDir)) {
+            fs.mkdirSync(resolvedDir, { recursive: true });
+        }
+        const safeDeck = sanitizeFilename(selectedDeck.name);
+        const suffix = filterLetter ? `_${filterLetter}` : '';
+        const outputPath = path.join(resolvedDir, `${safeDeck}${suffix}.${format}`);
+
+        console.log(`\nExporting ${rows.length} rows...`);
+
+        if (format === 'csv') {
+            exportToCsv(outputPath, selectedColumns, rows);
+        } else {
+            const title = `${selectedDeck.name}${filterLetter ? ` - Letter ${filterLetter}` : ''}`;
+            await exportToPdf(outputPath, selectedColumns, rows, title, filterLetter);
+        }
+
+        console.log(`Done: ${outputPath}`);
+
     } catch (error) {
         console.error(`\nError: ${error.message}`);
         process.exit(1);
+    } finally {
+        ankiDb.close();
     }
 }
 
-// Run if called directly
+// ── Entry point ─────────────────────────────────────────────────────────
+
 if (require.main === module) {
     main().catch(err => {
         console.error(err);
@@ -689,5 +665,4 @@ if (require.main === module) {
     });
 }
 
-// Export for use as module
-module.exports = { AnkiToCsvConverter, SimpleAnkiExporter };
+module.exports = { AnkiDatabase };
