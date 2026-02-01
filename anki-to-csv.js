@@ -111,7 +111,7 @@ function queryOne(db, sql, params = []) {
 class AnkiToCsvConverter {
     constructor(anki2Path, outputDir) {
         this.anki2Path = anki2Path;
-        this.outputDir = outputDir || path.dirname(anki2Path);
+        this.outputDir = outputDir || process.cwd();
         this.db = null;
         this.models = {};
         this.decks = {};
@@ -136,17 +136,70 @@ class AnkiToCsvConverter {
         
         // Load collection metadata
         const col = queryOne(this.db, 'SELECT models, decks FROM col');
-        
+
         if (!col) {
             throw new Error('No collection data found in database');
         }
 
-        // Parse models and decks JSON
-        this.models = JSON.parse(col.models);
-        this.decks = JSON.parse(col.decks);
+        // Try legacy schema first (models/decks as JSON in col table)
+        const hasLegacyModels = col.models && col.models !== '{}' && col.models !== '';
+        const hasLegacyDecks = col.decks && col.decks !== '{}' && col.decks !== '';
+
+        if (hasLegacyModels && hasLegacyDecks) {
+            this.models = JSON.parse(col.models);
+            this.decks = JSON.parse(col.decks);
+        } else {
+            // New schema (Anki 2.1.28+): separate tables
+            this.models = this._loadModelsFromTables();
+            this.decks = this._loadDecksFromTable();
+        }
 
         console.log(`Found ${Object.keys(this.models).length} note type(s)`);
         console.log(`Found ${Object.keys(this.decks).length} deck(s)`);
+    }
+
+    /**
+     * Loads models from the new schema tables (notetypes, FIELDS, templates)
+     */
+    _loadModelsFromTables() {
+        const models = {};
+        const notetypes = queryAll(this.db, 'SELECT id, name FROM notetypes');
+
+        for (const nt of notetypes) {
+            const fields = queryAll(
+                this.db,
+                'SELECT ord, name FROM FIELDS WHERE ntid = ? ORDER BY ord',
+                [nt.id]
+            );
+            const templates = queryAll(
+                this.db,
+                'SELECT ord, name FROM templates WHERE ntid = ? ORDER BY ord',
+                [nt.id]
+            );
+
+            models[nt.id] = {
+                name: nt.name,
+                flds: fields.map(f => ({ ord: f.ord, name: f.name })),
+                tmpls: templates.map(t => ({ name: t.name, ord: t.ord })),
+                type: 0 // default to standard; cloze detection not available without protobuf
+            };
+        }
+
+        return models;
+    }
+
+    /**
+     * Loads decks from the new schema decks table
+     */
+    _loadDecksFromTable() {
+        const decks = {};
+        const rows = queryAll(this.db, 'SELECT id, name FROM decks');
+
+        for (const row of rows) {
+            decks[row.id] = { name: row.name };
+        }
+
+        return decks;
     }
 
     /**
@@ -452,7 +505,7 @@ class AnkiToCsvConverter {
 class SimpleAnkiExporter {
     constructor(anki2Path, outputDir) {
         this.anki2Path = anki2Path;
-        this.outputDir = outputDir || path.dirname(anki2Path);
+        this.outputDir = outputDir || process.cwd();
         this.db = null;
     }
 
@@ -468,11 +521,37 @@ class SimpleAnkiExporter {
     async exportSimple() {
         await this.open();
 
+        if (!fs.existsSync(this.outputDir)) {
+            fs.mkdirSync(this.outputDir, { recursive: true });
+        }
+
         try {
             // Get collection metadata
             const col = queryOne(this.db, 'SELECT models, decks FROM col');
-            const models = JSON.parse(col.models);
-            const decks = JSON.parse(col.decks);
+            const hasLegacyModels = col.models && col.models !== '{}' && col.models !== '';
+            const hasLegacyDecks = col.decks && col.decks !== '{}' && col.decks !== '';
+
+            let models, decks;
+            if (hasLegacyModels && hasLegacyDecks) {
+                models = JSON.parse(col.models);
+                decks = JSON.parse(col.decks);
+            } else {
+                // New schema (Anki 2.1.28+)
+                models = {};
+                const notetypes = queryAll(this.db, 'SELECT id, name FROM notetypes');
+                for (const nt of notetypes) {
+                    const fields = queryAll(this.db, 'SELECT ord, name FROM FIELDS WHERE ntid = ? ORDER BY ord', [nt.id]);
+                    models[nt.id] = {
+                        name: nt.name,
+                        flds: fields.map(f => ({ ord: f.ord, name: f.name }))
+                    };
+                }
+                decks = {};
+                const deckRows2 = queryAll(this.db, 'SELECT id, name FROM decks');
+                for (const d of deckRows2) {
+                    decks[d.id] = { name: d.name };
+                }
+            }
 
             // Get unique deck IDs from cards
             const deckRows = queryAll(this.db, 'SELECT DISTINCT did FROM cards');
@@ -561,16 +640,16 @@ Usage:
 
 Arguments:
   anki2-file    Path to the .anki2 SQLite database file
-  output-dir    Output directory for CSV files (default: same as input)
+  output-dir    Output directory for CSV files (default: current directory)
 
 Options:
-  --simple      Simple export (just fields and tags, no metadata)
+  --meta        Include metadata columns (card status, reviews, lapses, etc.)
   --help, -h    Show this help message
 
 Examples:
   node anki-to-csv.js collection.anki2
   node anki-to-csv.js ~/Anki2/User/collection.anki2 ./output
-  node anki-to-csv.js deck.anki2 --simple
+  node anki-to-csv.js collection.anki2 ./output --meta
 
 Note: For .apkg files, first extract them (they're ZIP files) to get the
       .anki2 database file inside.
@@ -578,24 +657,23 @@ Note: For .apkg files, first extract them (they're ZIP files) to get the
         process.exit(0);
     }
 
-    const anki2Path = args[0];
-    const outputDir = args.find(a => !a.startsWith('--')) !== args[0] 
-        ? args.find((a, i) => i > 0 && !a.startsWith('--'))
-        : path.dirname(anki2Path);
-    const simpleMode = args.includes('--simple');
+    const positionalArgs = args.filter(a => !a.startsWith('--'));
+    const anki2Path = positionalArgs[0];
+    const outputDir = positionalArgs[1];
+    const metaMode = args.includes('--meta');
 
     console.log('Anki to CSV Converter');
     console.log('=====================\n');
 
     try {
-        if (simpleMode) {
-            console.log('Mode: Simple (fields + tags only)\n');
-            const exporter = new SimpleAnkiExporter(anki2Path, outputDir);
-            await exporter.exportSimple();
-        } else {
+        if (metaMode) {
             console.log('Mode: Full (with metadata)\n');
             const converter = new AnkiToCsvConverter(anki2Path, outputDir);
             await converter.convert();
+        } else {
+            console.log('Mode: Fields only\n');
+            const exporter = new SimpleAnkiExporter(anki2Path, outputDir);
+            await exporter.exportSimple();
         }
     } catch (error) {
         console.error(`\nError: ${error.message}`);

@@ -7,7 +7,7 @@
     "anki2-csv": "anki-to-csv.js"
   },
   "scripts": {
-    "start": "node anki-to-csv.js"
+    "start": "node anki-to-csv.js \"/mnt/c/Users/mucsi/AppData/Roaming/Anki2/User 1/collection.anki2\" out"
   },
   "dependencies": {
     "sql.js": "^1.12.0"
