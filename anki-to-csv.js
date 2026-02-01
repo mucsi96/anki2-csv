@@ -42,6 +42,12 @@ function escapeCsvField(value) {
     return str;
 }
 
+const ARTICLES = /^(die|der|das|den|dem|ein|eine|einen|einem|einer)\s+/i;
+
+function stripArticle(value) {
+    return value.replace(ARTICLES, '');
+}
+
 function sanitizeFilename(name) {
     return name
         .replace(/[<>:"/\\|?*]/g, '_')
@@ -439,7 +445,7 @@ Opens an Anki database and guides you through an interactive export:
   1. Select a deck
   2. Choose whether to include metadata columns
   3. Pick individual columns
-  4. Export all rows or filter by prefix
+  4. Export all rows or filter by starting letter
   5. Choose export format (CSV or PDF)
 `);
         process.exit(0);
@@ -526,12 +532,12 @@ Opens an Anki database and guides you through an interactive export:
             message: 'Export rows:',
             choices: [
                 { name: 'All rows', value: 'all' },
-                { name: 'Filter by prefix (e.g. A, die, das)', value: 'filter' }
+                { name: 'Filter by starting letter', value: 'filter' }
             ]
         });
 
         let filterColumn = null;
-        let filterPrefix = null;
+        let filterLetter = null;
 
         if (exportMode === 'filter') {
             const filterableColumns = selectedColumns.filter(
@@ -549,12 +555,12 @@ Opens an Anki database and guides you through an interactive export:
                     }))
                 });
 
-                const prefixRaw = await input({
-                    message: 'Starts with:',
+                const letterRaw = await input({
+                    message: 'Starting letter (articles like die/der/das are ignored):',
                     validate: val =>
-                        val.trim().length > 0 || 'Enter at least one character'
+                        /^[A-Za-z]$/.test(val.trim()) || 'Enter a single letter (A-Z)'
                 });
-                filterPrefix = prefixRaw.trim().toLowerCase();
+                filterLetter = letterRaw.trim().toUpperCase();
             }
         }
 
@@ -570,17 +576,17 @@ Opens an Anki database and guides you through an interactive export:
         // ── Build, filter, sort ─────────────────────────────────────
         let rows = buildRows(ankiDb, rawData, includeMeta, selectedColumns);
 
-        if (filterColumn && filterPrefix) {
+        if (filterColumn && filterLetter) {
             rows = rows.filter(row => {
-                const val = String(row[filterColumn] || '').trim().toLowerCase();
-                return val.startsWith(filterPrefix);
+                const val = stripArticle(String(row[filterColumn] || '').trim());
+                return val.length > 0 && val[0].toUpperCase() === filterLetter;
             });
         }
 
         if (filterColumn) {
             rows.sort((a, b) => {
-                const va = String(a[filterColumn] || '').toLowerCase();
-                const vb = String(b[filterColumn] || '').toLowerCase();
+                const va = stripArticle(String(a[filterColumn] || '')).toLowerCase();
+                const vb = stripArticle(String(b[filterColumn] || '')).toLowerCase();
                 return va.localeCompare(vb);
             });
         }
@@ -596,7 +602,7 @@ Opens an Anki database and guides you through an interactive export:
             fs.mkdirSync(resolvedDir, { recursive: true });
         }
         const safeDeck = sanitizeFilename(selectedDeck.name);
-        const suffix = filterPrefix ? `_${sanitizeFilename(filterPrefix)}` : '';
+        const suffix = filterLetter ? `_${filterLetter}` : '';
         const outputPath = path.join(resolvedDir, `${safeDeck}${suffix}.${format}`);
 
         console.log(`\nExporting ${rows.length} rows...`);
@@ -604,7 +610,7 @@ Opens an Anki database and guides you through an interactive export:
         if (format === 'csv') {
             exportToCsv(outputPath, selectedColumns, rows);
         } else {
-            const title = `${selectedDeck.name}${filterPrefix ? ` - "${filterPrefix}"` : ''}`;
+            const title = `${selectedDeck.name}${filterLetter ? ` - Letter ${filterLetter}` : ''}`;
             await exportToPdf(outputPath, selectedColumns, rows, title);
         }
 
