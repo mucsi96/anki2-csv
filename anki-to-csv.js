@@ -17,9 +17,21 @@ const FIELD_SEPARATOR = '\x1f';
 
 // ── Utility functions ───────────────────────────────────────────────────
 
+function decodeHtmlEntities(str) {
+    return str
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&amp;/gi, '&')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&#(\d+);/g, (_, num) => String.fromCharCode(parseInt(num, 10)))
+        .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
 function stripHtml(value) {
     if (value === null || value === undefined) return '';
-    return String(value).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    return decodeHtmlEntities(String(value).replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
 }
 
 function escapeCsvField(value) {
@@ -294,6 +306,30 @@ function exportToCsv(outputPath, columns, rows) {
 
 // ── PDF export ──────────────────────────────────────────────────────────
 
+function findUnicodeFont() {
+    const candidates = [
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+        '/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf',
+    ];
+    for (const p of candidates) {
+        if (fs.existsSync(p)) return p;
+    }
+    return null;
+}
+
+function findUnicodeFontBold() {
+    const candidates = [
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+        '/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf',
+    ];
+    for (const p of candidates) {
+        if (fs.existsSync(p)) return p;
+    }
+    return null;
+}
+
 function exportToPdf(outputPath, columns, rows, title) {
     let PDFDocument;
     try {
@@ -302,7 +338,17 @@ function exportToPdf(outputPath, columns, rows, title) {
         throw new Error('pdfkit is required for PDF export. Run: npm install');
     }
 
+    const fontRegular = findUnicodeFont();
+    const fontBold = findUnicodeFontBold();
+
     const doc = new PDFDocument({ layout: 'landscape', margin: 30, size: 'A4' });
+
+    if (fontRegular) doc.registerFont('Regular', fontRegular);
+    if (fontBold) doc.registerFont('Bold', fontBold);
+
+    const regularFont = fontRegular ? 'Regular' : 'Helvetica';
+    const boldFont = fontBold ? 'Bold' : 'Helvetica-Bold';
+
     const stream = fs.createWriteStream(outputPath);
     doc.pipe(stream);
 
@@ -316,10 +362,10 @@ function exportToPdf(outputPath, columns, rows, title) {
     const headerHeight = fontSize + 8;
 
     // Title
-    doc.fontSize(14).font('Helvetica-Bold')
+    doc.fontSize(14).font(boldFont)
         .text(title, 30, 30, { align: 'center', width: pageWidth });
     doc.moveDown(0.3);
-    doc.fontSize(8).font('Helvetica').fillColor('#666666')
+    doc.fontSize(8).font(regularFont).fillColor('#666666')
         .text(`${rows.length} rows | ${new Date().toISOString().slice(0, 10)}`, {
             align: 'center', width: pageWidth
         });
@@ -329,7 +375,7 @@ function exportToPdf(outputPath, columns, rows, title) {
 
     function drawHeader() {
         doc.rect(30, y, tableWidth, headerHeight).fill('#4472C4');
-        doc.font('Helvetica-Bold').fontSize(fontSize).fillColor('white');
+        doc.font(boldFont).fontSize(fontSize).fillColor('white');
         columns.forEach((col, i) => {
             doc.text(col, 33 + i * colWidth, y + 3, {
                 width: colWidth - 6, ellipsis: true, lineBreak: false
@@ -349,7 +395,7 @@ function exportToPdf(outputPath, columns, rows, title) {
 
     drawHeader();
 
-    doc.font('Helvetica').fontSize(fontSize);
+    doc.font(regularFont).fontSize(fontSize);
     rows.forEach((row, rowIdx) => {
         checkPage();
 
