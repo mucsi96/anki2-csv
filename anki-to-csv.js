@@ -387,7 +387,7 @@ async function main() {
 Anki Interactive Exporter
 =========================
 
-Usage: node anki-to-csv.js <anki2-file>
+Usage: node anki-to-csv.js <anki2-file> [output-dir]
 
 Opens an Anki database and guides you through an interactive export:
   1. Select a deck
@@ -401,6 +401,7 @@ Opens an Anki database and guides you through an interactive export:
 
     const { select, checkbox, confirm, input } = await import('@inquirer/prompts');
     const anki2Path = args[0];
+    const outputDir = args[1] || '.';
 
     console.log('Anki Interactive Exporter');
     console.log('========================\n');
@@ -544,9 +545,13 @@ Opens an Anki database and guides you through an interactive export:
         }
 
         // ── Generate output ─────────────────────────────────────────
+        const resolvedDir = path.resolve(outputDir);
+        if (!fs.existsSync(resolvedDir)) {
+            fs.mkdirSync(resolvedDir, { recursive: true });
+        }
         const safeDeck = sanitizeFilename(selectedDeck.name);
         const suffix = filterLetter ? `_${filterLetter}` : '';
-        const outputPath = path.join(process.cwd(), `${safeDeck}${suffix}.${format}`);
+        const outputPath = path.join(resolvedDir, `${safeDeck}${suffix}.${format}`);
 
         console.log(`\nExporting ${rows.length} rows...`);
 
