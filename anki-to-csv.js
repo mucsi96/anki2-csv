@@ -364,7 +364,7 @@ function exportToPdf(outputPath, columns, rows, title, filterLetter) {
     const colWidth = Math.floor(pageWidth / colCount);
     const tableWidth = colWidth * colCount;
     const fontSize = colCount > 10 ? 5 : colCount > 7 ? 6 : colCount > 4 ? 7 : 8;
-    const rowHeight = fontSize + 6;
+    const rowHeight = (fontSize + 6) * 2;
     const headerHeight = fontSize + 8;
 
     // Title
@@ -403,7 +403,7 @@ function exportToPdf(outputPath, columns, rows, title, filterLetter) {
 
     function checkPage() {
         if (y + rowHeight > pageHeight + 30) {
-            doc.addPage();
+            doc.addPage({ layout: 'landscape', size: 'A4' });
             y = 30;
             drawFilterLetter();
             drawHeader();
@@ -427,7 +427,7 @@ function exportToPdf(outputPath, columns, rows, title, filterLetter) {
         columns.forEach((col, i) => {
             const val = String(row[col] || '');
             doc.text(val, 33 + i * colWidth, y + 2, {
-                width: colWidth - 6, ellipsis: true, lineBreak: false
+                width: colWidth - 6, height: rowHeight - 4, ellipsis: true, lineBreak: true
             });
         });
         y += rowHeight;
