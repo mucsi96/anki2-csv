@@ -336,7 +336,7 @@ function findUnicodeFontBold() {
     return null;
 }
 
-function exportToPdf(outputPath, columns, rows, title) {
+function exportToPdf(outputPath, columns, rows, title, filterLetter) {
     let PDFDocument;
     try {
         PDFDocument = require('pdfkit');
@@ -391,14 +391,26 @@ function exportToPdf(outputPath, columns, rows, title) {
         doc.fillColor('black');
     }
 
+    function drawFilterLetter() {
+        if (filterLetter) {
+            doc.save();
+            doc.font(boldFont).fontSize(24).fillColor('#CCCCCC')
+                .text(filterLetter, doc.page.width - 54, 10, { width: 30, align: 'right' });
+            doc.restore();
+            doc.font(regularFont).fontSize(fontSize).fillColor('black');
+        }
+    }
+
     function checkPage() {
         if (y + rowHeight > pageHeight + 30) {
             doc.addPage();
             y = 30;
+            drawFilterLetter();
             drawHeader();
         }
     }
 
+    drawFilterLetter();
     drawHeader();
 
     doc.font(regularFont).fontSize(fontSize);
@@ -451,7 +463,7 @@ Opens an Anki database and guides you through an interactive export:
         process.exit(0);
     }
 
-    const { select, checkbox, confirm, input } = await import('@inquirer/prompts');
+    const { select, confirm, input } = await import('@inquirer/prompts');
     const anki2Path = args[0];
     const outputDir = args[1] || '.';
 
@@ -516,16 +528,36 @@ Opens an Anki database and guides you through an interactive export:
             'tags'
         ];
 
-        // ── Step 3: Pick columns ────────────────────────────────────
-        const selectedColumns = await checkbox({
-            message: 'Select columns to include:',
-            choices: allAvailable.map(col => ({
-                name: col,
-                value: col,
-                checked: true
-            })),
-            required: true
-        });
+        // ── Step 3: Pick columns in order ─────────────────────────────
+        const selectedColumns = [];
+        let remaining = [...allAvailable];
+
+        while (remaining.length > 0) {
+            const choices = [
+                ...remaining.map(col => ({ name: col, value: col })),
+                ...(selectedColumns.length > 0
+                    ? [{ name: '── Done ──', value: '__done__' }]
+                    : [])
+            ];
+
+            const picked = await select({
+                message: selectedColumns.length === 0
+                    ? 'Pick the first column:'
+                    : `Pick column #${selectedColumns.length + 1} (${selectedColumns.join(', ')}):`,
+                choices
+            });
+
+            if (picked === '__done__') break;
+
+            selectedColumns.push(picked);
+            remaining = remaining.filter(c => c !== picked);
+        }
+
+        if (selectedColumns.length === 0) {
+            console.log('No columns selected. Exiting.');
+            ankiDb.close();
+            return;
+        }
 
         // ── Step 4: Export mode ─────────────────────────────────────
         const exportMode = await select({
@@ -611,7 +643,7 @@ Opens an Anki database and guides you through an interactive export:
             exportToCsv(outputPath, selectedColumns, rows);
         } else {
             const title = `${selectedDeck.name}${filterLetter ? ` - Letter ${filterLetter}` : ''}`;
-            await exportToPdf(outputPath, selectedColumns, rows, title);
+            await exportToPdf(outputPath, selectedColumns, rows, title, filterLetter);
         }
 
         console.log(`Done: ${outputPath}`);

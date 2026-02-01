@@ -77,6 +77,21 @@ With `--meta`, the following additional columns are prepended:
 | `due`            | Due value                            |
 | `last_modified`  | Last modified timestamp (ISO 8601)   |
 
+## Interactive workflow
+
+The tool runs an interactive CLI that guides you through:
+
+1. **Deck selection** – pick which deck to export
+2. **Column selection** – choose which fields to include
+3. **Filtering** – optionally filter rows by the starting letter of a chosen column
+4. **Export format** – CSV or PDF
+
+### German article handling
+
+When filtering and sorting by starting letter, German articles at the beginning of a value are ignored. For example, "die Katze" is sorted and filtered under **K**, not **D**.
+
+Ignored articles: `die`, `der`, `das`, `den`, `dem`, `ein`, `eine`, `einen`, `einem`, `einer`.
+
 ## Note on `.apkg` files
 
 `.apkg` files are ZIP archives. Extract them first to get the `.anki2` database file inside.
