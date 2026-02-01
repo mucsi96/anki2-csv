@@ -439,7 +439,7 @@ Opens an Anki database and guides you through an interactive export:
   1. Select a deck
   2. Choose whether to include metadata columns
   3. Pick individual columns
-  4. Export all rows or filter by starting letter
+  4. Export all rows or filter by prefix
   5. Choose export format (CSV or PDF)
 `);
         process.exit(0);
@@ -526,12 +526,12 @@ Opens an Anki database and guides you through an interactive export:
             message: 'Export rows:',
             choices: [
                 { name: 'All rows', value: 'all' },
-                { name: 'Filter by starting letter', value: 'filter' }
+                { name: 'Filter by prefix (e.g. A, die, das)', value: 'filter' }
             ]
         });
 
         let filterColumn = null;
-        let filterLetter = null;
+        let filterPrefix = null;
 
         if (exportMode === 'filter') {
             const filterableColumns = selectedColumns.filter(
@@ -549,12 +549,12 @@ Opens an Anki database and guides you through an interactive export:
                     }))
                 });
 
-                const letterRaw = await input({
-                    message: 'Starting letter:',
+                const prefixRaw = await input({
+                    message: 'Starts with:',
                     validate: val =>
-                        /^[A-Za-z]$/.test(val.trim()) || 'Enter a single letter (A-Z)'
+                        val.trim().length > 0 || 'Enter at least one character'
                 });
-                filterLetter = letterRaw.trim().toUpperCase();
+                filterPrefix = prefixRaw.trim().toLowerCase();
             }
         }
 
@@ -570,10 +570,10 @@ Opens an Anki database and guides you through an interactive export:
         // ── Build, filter, sort ─────────────────────────────────────
         let rows = buildRows(ankiDb, rawData, includeMeta, selectedColumns);
 
-        if (filterColumn && filterLetter) {
+        if (filterColumn && filterPrefix) {
             rows = rows.filter(row => {
-                const val = String(row[filterColumn] || '').trim();
-                return val.length > 0 && val[0].toUpperCase() === filterLetter;
+                const val = String(row[filterColumn] || '').trim().toLowerCase();
+                return val.startsWith(filterPrefix);
             });
         }
 
@@ -596,7 +596,7 @@ Opens an Anki database and guides you through an interactive export:
             fs.mkdirSync(resolvedDir, { recursive: true });
         }
         const safeDeck = sanitizeFilename(selectedDeck.name);
-        const suffix = filterLetter ? `_${filterLetter}` : '';
+        const suffix = filterPrefix ? `_${sanitizeFilename(filterPrefix)}` : '';
         const outputPath = path.join(resolvedDir, `${safeDeck}${suffix}.${format}`);
 
         console.log(`\nExporting ${rows.length} rows...`);
@@ -604,7 +604,7 @@ Opens an Anki database and guides you through an interactive export:
         if (format === 'csv') {
             exportToCsv(outputPath, selectedColumns, rows);
         } else {
-            const title = `${selectedDeck.name}${filterLetter ? ` - Letter ${filterLetter}` : ''}`;
+            const title = `${selectedDeck.name}${filterPrefix ? ` - "${filterPrefix}"` : ''}`;
             await exportToPdf(outputPath, selectedColumns, rows, title);
         }
 
