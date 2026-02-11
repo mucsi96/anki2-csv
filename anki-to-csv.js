@@ -407,6 +407,7 @@ function exportToPdf(outputPath, columns, rows, title, filterLetter) {
             y = 30;
             drawFilterLetter();
             drawHeader();
+            doc.font(regularFont).fontSize(fontSize);
         }
     }
 
@@ -568,25 +569,27 @@ Opens an Anki database and guides you through an interactive export:
             ]
         });
 
-        let filterColumn = null;
+        let sortColumn = null;
         let filterLetter = null;
 
-        if (exportMode === 'filter') {
-            const filterableColumns = selectedColumns.filter(
-                c => !META_COLUMNS.includes(c)
-            );
+        const filterableColumns = selectedColumns.filter(
+            c => !META_COLUMNS.includes(c)
+        );
 
-            if (filterableColumns.length === 0) {
+        if (filterableColumns.length > 0) {
+            sortColumn = await select({
+                message: 'Which column to sort by?',
+                choices: filterableColumns.map(col => ({
+                    name: col,
+                    value: col
+                }))
+            });
+        }
+
+        if (exportMode === 'filter') {
+            if (!sortColumn) {
                 console.log('No field columns selected to filter on. Exporting all rows.');
             } else {
-                filterColumn = await select({
-                    message: 'Which column to filter and sort by?',
-                    choices: filterableColumns.map(col => ({
-                        name: col,
-                        value: col
-                    }))
-                });
-
                 const letterRaw = await input({
                     message: 'Starting letter (articles like die/der/das are ignored):',
                     validate: val =>
@@ -608,17 +611,17 @@ Opens an Anki database and guides you through an interactive export:
         // ── Build, filter, sort ─────────────────────────────────────
         let rows = buildRows(ankiDb, rawData, includeMeta, selectedColumns);
 
-        if (filterColumn && filterLetter) {
+        if (sortColumn && filterLetter) {
             rows = rows.filter(row => {
-                const val = stripArticle(String(row[filterColumn] || '').trim());
+                const val = stripArticle(String(row[sortColumn] || '').trim());
                 return val.length > 0 && val[0].toUpperCase() === filterLetter;
             });
         }
 
-        if (filterColumn) {
+        if (sortColumn) {
             rows.sort((a, b) => {
-                const va = stripArticle(String(a[filterColumn] || '')).toLowerCase();
-                const vb = stripArticle(String(b[filterColumn] || '')).toLowerCase();
+                const va = stripArticle(String(a[sortColumn] || '')).toLowerCase();
+                const vb = stripArticle(String(b[sortColumn] || '')).toLowerCase();
                 return va.localeCompare(vb);
             });
         }
