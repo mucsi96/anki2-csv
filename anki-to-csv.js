@@ -379,6 +379,20 @@ function exportToPdf(outputPath, columns, rows, title, filterLetter) {
 
     let y = doc.y;
 
+    // Pre-calculate total pages
+    const firstPageSpace = Math.floor(((pageHeight + 30) - y - headerHeight) / rowHeight);
+    const laterPageSpace = Math.floor((pageHeight - headerHeight) / rowHeight);
+    const totalPages = rows.length <= firstPageSpace
+        ? 1
+        : 1 + Math.ceil((rows.length - firstPageSpace) / laterPageSpace);
+    let currentPage = 1;
+
+    function drawPageNumber() {
+        doc.font(regularFont).fontSize(8).fillColor('#666666')
+            .text(`${currentPage} / ${totalPages}`, doc.page.width - 80, 10, { width: 50, align: 'right' });
+        doc.fillColor('black');
+    }
+
     function drawHeader() {
         doc.rect(30, y, tableWidth, headerHeight).fill('#4472C4');
         doc.font(boldFont).fontSize(fontSize).fillColor('white');
@@ -405,12 +419,15 @@ function exportToPdf(outputPath, columns, rows, title, filterLetter) {
         if (y + rowHeight > pageHeight + 30) {
             doc.addPage({ layout: 'landscape', size: 'A4' });
             y = 30;
+            currentPage++;
+            drawPageNumber();
             drawFilterLetter();
             drawHeader();
             doc.font(regularFont).fontSize(fontSize);
         }
     }
 
+    drawPageNumber();
     drawFilterLetter();
     drawHeader();
 
